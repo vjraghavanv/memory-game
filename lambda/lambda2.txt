@@ -1,0 +1,153 @@
+Generate cards
+
+
+import boto3
+import json
+import base64
+import uuid
+
+# Initialize Bedrock Runtime client (not Bedrock)
+client = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+def generate_image(prompt):
+    """
+    Generates an image using Titan Image Generator via Amazon Bedrock.
+    :param prompt: Text prompt for image generation.
+    :return: Base64 encoded image data.
+    """
+    try:
+        # Define the payload according to Titan Image Generator specifications
+        payload = {
+            "text": prompt,
+            "numberOfImages": 1
+        }
+
+        # Invoke the Titan Image Generator model
+        response = client.invoke_model(
+            modelId="amazon.titan-image-generator-v1",
+            body=json.dumps(payload),
+            accept="application/json",
+            contentType="application/json"
+        )
+
+        # Parse the response
+        response_body = json.loads(response['body']) if isinstance(response['body'], str) else json.loads(response['body'].read())
+        
+        if 'images' in response_body and response_body['images']:
+            # Return the base64 encoded image
+            return response_body['images'][0]
+        else:
+            print("No image generated in response")
+            return None
+
+    except Exception as e:
+        print(f"Error generating image: {e}")
+        return None
+
+def upload_to_s3(base64_image, bucket_name, name):
+    """
+    Uploads a base64 encoded image to S3.
+    :param base64_image: Base64 encoded image data.
+    :param bucket_name: S3 bucket name.
+    :param name: Name to use in the S3 key.
+    :return: URL of the uploaded image.
+    """
+    try:
+        s3_client = boto3.client('s3')
+        
+        # Decode base64 image
+        image_data = base64.b64decode(base64_image)
+        
+        # Generate a unique key for the image
+        key = f"cards/{name.lower()}_{uuid.uuid4()}.png"
+        
+        # Upload to S3
+        s3_client.put_object(
+            Bucket="gen-images-storage",
+            Key=key,
+            Body=image_data,
+            ContentType='image/png'
+        )
+        
+        # Generate the URL
+        url = f"https://{gen-images-storage}.s3.amazonaws.com/{key}"
+        return url
+    
+    except Exception as e:
+        print(f"Error uploading to S3: {e}")
+        return None
+
+def lambda_handler(event, context):
+    """
+    Lambda handler function to generate memory card images.
+    :param event: AWS Lambda event.
+    :param context: AWS Lambda context.
+    :return: JSON response with card details.
+    """
+    try:
+        # Get card names from the event body
+        if 'body' in event:
+            body = json.loads(event['body'])
+            card_names = body.get('card_names', ["Star", "Moon", "Sun", "Planet"])
+        else:
+            card_names = ["Star", "Moon", "Sun", "Planet"]  # Default card names
+
+        # S3 bucket name where images will be stored
+        BUCKET_NAME = "gen-images-storage"  # Replace with your bucket name
+        
+        cards = []
+
+        for name in card_names:
+            # Generate prompt for the image
+            prompt = f"A beautiful illustration of a {name} in outer space, high quality, detailed"
+            
+            # Generate the image
+            base64_image = generate_image(prompt)
+            
+            if base64_image:
+                # Upload image to S3
+                image_url = upload_to_s3(base64_image, BUCKET_NAME, name)
+                
+                if image_url:
+                    cards.append({
+                        "name": name,
+                        "image_url": image_url
+                    })
+                else:
+                    # Fallback to placeholder if S3 upload fails
+                    cards.append({
+                        "name": name,
+                        "image_url": f"https://via.placeholder.com/512?text={name}"
+                    })
+            else:
+                # Fallback to placeholder if image generation fails
+                cards.append({
+                    "name": name,
+                    "image_url": f"https://via.placeholder.com/512?text={name}"
+                })
+
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"  # For CORS support
+            },
+            "body": json.dumps({
+                "cards": cards,
+                "message": "Cards generated successfully"
+            })
+        }
+
+    except Exception as e:
+        print(f"Error in lambda_handler: {e}")
+        return {
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps({
+                "error": str(e),
+                "message": "An error occurred while processing the request"
+            })
+        }
